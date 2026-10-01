@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Lancer EMP_QUALIFLEX_Q_Optimum_Local (Debug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/EMP_QUALIFLEX_Q_Optimum_Local/bin/Debug/net10.0-windows/win-x64/EMP_QUALIFLEX_Q_Optimum_Local.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/EMP_QUALIFLEX_Q_Optimum_Local/bin/Debug/net10.0-windows/win-x64",
+      "stopAtEntry": false,
+      "console": "internalConsole"
+    }
+  ]
+}
