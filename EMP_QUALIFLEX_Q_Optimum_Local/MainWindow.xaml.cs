@@ -1,4 +1,8 @@
 ﻿// corrigé le 25/06/2020
+// Version V4 : [V4-ANTI-CONDORCET] le ∧ / ∨ point à point de la reconstruction utilise un ordre de référence
+//   fixe et transitif (score de la méthode contre un panel fixe de vecteurs de l'image), et la suite
+//   des marqueurs est rendue monotone : plus de cycle de Condorcet, stabilité toujours atteinte.
+//   Le classement des n pixels de la fenêtre (MinMaxVecteurs) est inchangé.
 // =====================================================================================
 // EMP_QUALIFLEX_Q_Optimum_Local
 // Morphologie mathématique multivaluée (images multibandes) avec ordonnancement vectoriel
@@ -348,6 +352,132 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
             return false;
         }
 
+        // =====================================================================================
+        // [V4-ANTI-CONDORCET] ORDRE DE RÉFÉRENCE FIXE POUR LE ∧ / ∨ POINT À POINT DE LA RECONSTRUCTION
+        // =====================================================================================
+        // Méthode : QUALIFLEX.
+        // Problème corrigé : jusqu'ici, le ∧ / ∨ point à point de la reconstruction comparait deux vecteurs
+        // seuls (la méthode appliquée à l'ensemble {A, B}). Cette comparaison n'est pas transitive : elle
+        // admet des cycles de Condorcet (A > B, B > C et C > A), et la reconstruction pouvait tourner en
+        // boucle sans jamais se stabiliser.
+        // Correction : chaque vecteur v reçoit un score FIXE, calculé avec la même méthode et les mêmes
+        // paramètres, mais toujours contre le même panel de référence R : au plus TAILLE_PANEL_REF
+        // vecteurs prélevés une fois pour toutes dans l'image d'entrée f.
+        //   C_R(v) = (1/|R|) somme_{r dans R} somme_k w_k s_k(v, r),
+        //   s_k = +1 si v_k > r_k, -1 si v_k < r_k, 0 sinon (indice de concordance/discordance QUALIFLEX).
+        // Deux vecteurs sont comparés par ce score, puis par l'ordre lexicographique des bandes en cas
+        // d'égalité : c'est un ordre TOTAL sur les valeurs (réflexif, antisymétrique, transitif), donc
+        // aucun cycle de Condorcet n'est possible. Le classement des n pixels de la fenêtre
+        // (MinMaxVecteurs) n'est PAS modifié : seul le ∧ / ∨ point à point de la reconstruction change.
+        private const int TAILLE_PANEL_REF = 256;          // [V4-ANTI-CONDORCET] nombre maximal de vecteurs du panel R
+        private List<int[]> panelRef;                       // [V4-ANTI-CONDORCET] panel de référence R
+        private int[] prioriteRef;                          // [V4-ANTI-CONDORCET] ordre des bandes pour le départage
+        private Dictionary<int[], double> cacheScoreRef;    // [V4-ANTI-CONDORCET] score déjà calculé de chaque vecteur
+        private double[] poidsRef;                          // [V4-ANTI-CONDORCET] poids des bandes
+        // [V4-ANTI-CONDORCET] Égalité exacte de deux vecteurs (clé du cache des scores)
+        private sealed class ComparateurVecteurs : IEqualityComparer<int[]>
+        {
+            public bool Equals(int[] a, int[] b)
+            {
+                if (ReferenceEquals(a, b)) return true;
+                if (a == null || b == null || a.Length != b.Length) return false;
+                for (int i = 0; i < a.Length; i++)
+                    if (a[i] != b[i]) return false;
+                return true;
+            }
+
+            public int GetHashCode(int[] a)
+            {
+                unchecked
+                {
+                    int h = 17;
+                    for (int i = 0; i < a.Length; i++) h = h * 31 + a[i];
+                    return h;
+                }
+            }
+        }
+
+        // [V4-ANTI-CONDORCET] Construction du panel R (prélèvement systématique : un pixel sur 'pas', dans
+        // l'ordre de parcours x puis y de l'image d'entrée) et de l'ordre de départage des bandes.
+        private void PreparerOrdreReference(List<int[,]> imagesMat, double[] poids)
+        {
+            int m = imagesMat.Count;
+            int W = imagesMat[0].GetLength(0), H = imagesMat[0].GetLength(1);
+            int total = W * H;
+            int pas = Math.Max(1, (total + TAILLE_PANEL_REF - 1) / TAILLE_PANEL_REF);
+            panelRef = new List<int[]>();
+            for (int p = 0; p < total; p += pas)
+            {
+                int[] v = new int[m];
+                for (int k = 0; k < m; k++) v[k] = imagesMat[k][p / H, p % H];
+                panelRef.Add(v);
+            }
+            // Départage : bandes par poids décroissant (à poids égaux, la bande d'indice le plus petit d'abord)
+            prioriteRef = new int[m];
+            for (int k = 0; k < m; k++) prioriteRef[k] = k;
+            for (int a = 1; a < m; a++)   // tri par insertion (stable)
+            {
+                int bande = prioriteRef[a];
+                int j = a - 1;
+                while (j >= 0 && poids[prioriteRef[j]] < poids[bande])
+                {
+                    prioriteRef[j + 1] = prioriteRef[j];
+                    j--;
+                }
+                prioriteRef[j + 1] = bande;
+            }
+            poidsRef = (double[])poids.Clone();
+
+            cacheScoreRef = new Dictionary<int[], double>(new ComparateurVecteurs());
+        }
+
+        // [V4-ANTI-CONDORCET] Score fixe C_R(v) : indice de concordance/discordance QUALIFLEX de v contre le panel R
+        private double ScoreReference(int[] v)
+        {
+            double s;
+            if (cacheScoreRef.TryGetValue(v, out s)) return s;
+            int m = v.Length;
+            double somme = 0;
+            foreach (int[] r in panelRef)
+                for (int k = 0; k < m; k++)
+                {
+                    int signe = v[k] > r[k] ? 1 : (v[k] < r[k] ? -1 : 0);
+                    somme += poidsRef[k] * signe;
+                }
+            s = somme / panelRef.Count;
+            if (double.IsNaN(s) || double.IsInfinity(s)) s = 0;   // sécurité : le score reste une fonction de v
+            s = Math.Round(s, 10);                                 // arrondi fixe : ex aequo numériques => départage lexicographique
+            cacheScoreRef[v] = s;
+            return s;
+        }
+
+        // [V4-ANTI-CONDORCET] Comparaison de deux vecteurs pour le ∧ / ∨ point à point de la reconstruction :
+        // score fixe (contre le panel R), puis ordre lexicographique des bandes (prioriteRef) en cas d'égalité.
+        // C'est un ordre total sur les valeurs : il est transitif, aucun cycle de Condorcet n'est possible.
+        // Retourne -1 si A < B, 0 si A et B sont le même vecteur, 1 si A > B.
+        private int CompareReference(List<int[,]> imgA, int xa, int ya, List<int[,]> imgB, int xb, int yb)
+        {
+            int m = imgA.Count;
+            int[] a = new int[m];
+            int[] b = new int[m];
+            for (int k = 0; k < m; k++)
+            {
+                a[k] = imgA[k][xa, ya];
+                b[k] = imgB[k][xb, yb];
+            }
+            double sa = ScoreReference(a);
+            double sb = ScoreReference(b);
+            if (sa < sb) return -1;
+            if (sa > sb) return 1;
+            foreach (int k in prioriteRef)
+            {
+                if (a[k] < b[k]) return -1;
+                if (a[k] > b[k]) return 1;
+            }
+            return 0;
+        }
+
+
         // ============================== RECONSTRUCTION MORPHOLOGIQUE ==============================
         // Ouverture par reconstruction : R^delta_f( epsilon_Bi(f) )  (marqueur = érodé, masque = f)
         // Fermeture par reconstruction : R^epsilon_f( delta_Bi(f) )  (marqueur = dilaté, masque = f)
@@ -366,6 +496,21 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
                 gLastOuvert.Add((int[,])imagesErodeInit[k].Clone());
                 gLastFerme.Add((int[,])imagesDilateInit[k].Clone());
             }
+
+            // [V4-ANTI-CONDORCET] Ordre de référence fixe (transitif) utilisé par le ∧ / ∨ point à point.
+            PreparerOrdreReference(imagesMat, poids);
+            // [V4-ANTI-CONDORCET] Marqueurs placés du bon côté du masque f (au sens de l'ordre de référence) :
+            //   ouverture : h0 = inf(epsilon(f), f) ;  fermeture : h0 = sup(delta(f), f).
+            // Avec la règle de monotonie de ErosionDilatationGeodesique, la suite des marqueurs est monotone
+            // et bornée par f dans un ensemble fini de vecteurs : la stabilité est TOUJOURS atteinte.
+            for (int x = 0; x < imagesMat[0].GetLength(0); x++)
+                for (int y = 0; y < imagesMat[0].GetLength(1); y++)
+                {
+                    if (CompareReference(gLastOuvert, x, y, imagesMat, x, y) > 0)
+                        for (int k = 0; k < imagesMat.Count; k++) gLastOuvert[k][x, y] = imagesMat[k][x, y];
+                    if (CompareReference(gLastFerme, x, y, imagesMat, x, y) < 0)
+                        for (int k = 0; k < imagesMat.Count; k++) gLastFerme[k][x, y] = imagesMat[k][x, y];
+                }
             int toleranceStabilite = 0;
             if (itStabilite == 0) itStabilite = int.MaxValue; // 0 = nombre d'itérations non limité
             bool stopErod = false, stopDilat = false;
@@ -375,6 +520,8 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
             // devenir périodique (A -> B -> ... -> A) sans jamais se stabiliser. On mémorise l'empreinte de
             // chaque état rencontré ; si un état réapparaît, la stabilité ne sera jamais atteinte et on arrête
             // la transformation concernée (évite une boucle infinie avec 0 itération = illimité et 100 %).
+            // [V4-ANTI-CONDORCET] Avec l'ordre de référence et la règle de monotonie, un état ne peut plus réapparaître ;
+            // cette détection de cycle est conservée uniquement par sécurité (elle ne se déclenche plus).
             HashSet<ulong> etatsOuvert = new HashSet<ulong>();
             HashSet<ulong> etatsFerme = new HashSet<ulong>();
             etatsOuvert.Add(Empreinte(gLastOuvert));
@@ -422,6 +569,8 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
         //   dilatation géodésique : delta_f^(1)(h)   = infimum ( delta_B1(h),   f )  -> ouverture
         //   érosion géodésique    : epsilon_f^(1)(h) = supremum( epsilon_B1(h), f )  -> fermeture
         // Le supremum/infimum de deux vecteurs est déterminé par l'ordre QUALIFLEX.
+        // [V4-ANTI-CONDORCET] Le ∧ / ∨ point à point utilise CompareReference (ordre de référence fixe et transitif)
+        // et la suite des marqueurs est monotone (voir la section ORDRE DE RÉFÉRENCE FIXE).
         private void ErosionDilatationGeodesique(List<int[,]> imagesMat, List<int[,]> gLastFerme, List<int[,]> gLastOuvert, double[] poids, double prStabilite, ref List<int[,]> gNewFerme, ref List<int[,]> gNewOuvert, ref bool stopErod, ref bool stopDilat)
         {
             int W = imagesMat[0].GetLength(0), H = imagesMat[0].GetLength(1);
@@ -447,18 +596,30 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
                         MinMaxVecteurs(gLastFerme, gLastOuvert, poids, x, y, ref sMin, ref tMin, ref sMax, ref tMax, 1);
 
                         // Érosion géodésique : supremum( epsilon_B1(h), f )
-                        int cmpFerme = CompareDeuxVecteursQUALIFLEX(imagesMat, x, y, gLastFerme, sMin, tMin, poids);
+                        // [V4-ANTI-CONDORCET] sup(epsilon_B1(h), f) au sens de l'ordre de référence fixe (transitif)
+                        int cmpFerme = CompareReference(imagesMat, x, y, gLastFerme, sMin, tMin);
                         if (cmpFerme < 0) // f < epsilon_B1(h) => le supremum est epsilon_B1(h)
                             for (int k = 0; k < imagesMat.Count; k++) gNewFerme[k][x, y] = gLastFerme[k][sMin, tMin];
                         else              // f >= epsilon_B1(h) => le supremum est f
                             for (int k = 0; k < imagesMat.Count; k++) gNewFerme[k][x, y] = imagesMat[k][x, y];
+                        // [V4-ANTI-CONDORCET] Monotonie : la fermeture par reconstruction est la limite d'une suite
+                        // DÉCROISSANTE. Si la nouvelle valeur est plus grande que la précédente (au sens de l'ordre
+                        // de référence), la valeur précédente est conservée : aucun aller-retour, donc aucun cycle.
+                        if (CompareReference(gNewFerme, x, y, gLastFerme, x, y) > 0)
+                            for (int k = 0; k < imagesMat.Count; k++) gNewFerme[k][x, y] = gLastFerme[k][x, y];
 
                         // Dilatation géodésique : infimum( delta_B1(h), f )
-                        int cmpOuvert = CompareDeuxVecteursQUALIFLEX(gLastOuvert, sMax, tMax, imagesMat, x, y, poids);
+                        // [V4-ANTI-CONDORCET] inf(delta_B1(h), f) au sens de l'ordre de référence fixe (transitif)
+                        int cmpOuvert = CompareReference(gLastOuvert, sMax, tMax, imagesMat, x, y);
                         if (cmpOuvert < 0) // delta_B1(h) < f => l'infimum est delta_B1(h)
                             for (int k = 0; k < imagesMat.Count; k++) gNewOuvert[k][x, y] = gLastOuvert[k][sMax, tMax];
                         else               // delta_B1(h) >= f => l'infimum est f
                             for (int k = 0; k < imagesMat.Count; k++) gNewOuvert[k][x, y] = imagesMat[k][x, y];
+                        // [V4-ANTI-CONDORCET] Monotonie : l'ouverture par reconstruction est la limite d'une suite
+                        // CROISSANTE. Si la nouvelle valeur est plus petite que la précédente (au sens de l'ordre
+                        // de référence), la valeur précédente est conservée : aucun aller-retour, donc aucun cycle.
+                        if (CompareReference(gNewOuvert, x, y, gLastOuvert, x, y) < 0)
+                            for (int k = 0; k < imagesMat.Count; k++) gNewOuvert[k][x, y] = gLastOuvert[k][x, y];
 
                         // Test de stabilité : le pixel est-il identique à l'itération précédente (toutes bandes) ?
                         int locOuv = 0, locFerm = 0;
@@ -487,6 +648,8 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
         // Ex aequo (I(A,B) = I(B,A)) : départage par l'indice spatial des pixels (le plus grand indice est en tête),
         // comme dans le calcul du voisinage (voir SearchPerm).
         // Retourne -1 si A < B, 0 si A = B (même position), 1 si A > B.
+        // [V4-ANTI-CONDORCET] Ancienne comparaison (versions précédentes), conservée pour mémoire : la reconstruction
+        // ne l'appelle plus, elle utilise CompareReference (ordre de référence fixe et transitif).
         private int CompareDeuxVecteursQUALIFLEX(List<int[,]> imgA, int xa, int ya, List<int[,]> imgB, int xb, int yb, double[] poids)
         {
             int m = imgA.Count;

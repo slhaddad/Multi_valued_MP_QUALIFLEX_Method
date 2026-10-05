@@ -18,7 +18,8 @@ The supremum and infimum obtained in every neighborhood are used to compute, for
 - **Framework:** .NET 10 (`net10.0-windows`)
 - **Development environment:** Visual Studio Code with the *C# Dev Kit* extension
 - **Operating system:** Windows 64-bit (WPF is Windows-only)
-- **Structuring element:** disk; the disk of size i is obtained by i successive applications of the elementary disk of radius 1 (5 pixels). Border pixels whose neighborhood falls outside the image are kept unchanged.
+- **Structuring element:** disk; the disk of size i is obtained by i successive applications of the elementary disk of radius 1 (5 pixels), because QUALIFLEX enumerates the n! permutations of the neighborhood and is therefore limited to 5 pixel-vectors per step (the resulting shape is a diamond from i = 3 on). Border pixels whose neighborhood falls outside the image are kept unchanged.
+- **Reconstruction (version 4):** the pointwise infimum and supremum between two pixel-vectors in the geodesic reconstruction no longer compare the two vectors alone, which is not transitive and can produce Condorcet cycles (A > B, B > C and C > A). Each pixel-vector now receives the method's own score computed against a fixed reference set of at most 256 pixel-vectors sampled from the input image; equal scores are broken by the lexicographic order of the bands. This gives a fixed total order, and the marker sequence is kept monotone, so the reconstruction always stops on an exact fixed point (use `0` iterations and `100` % for the exact reconstruction). The ranking of the pixel-vectors of the neighborhood is unchanged. The added code is marked `[V4-ANTI-CONDORCET]` in `MainWindow.xaml.cs`.
 - **Interface language:** French
 
 ## Repository content
