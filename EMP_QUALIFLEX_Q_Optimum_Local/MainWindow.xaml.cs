@@ -3,6 +3,8 @@
 //   fixe et transitif (score de la méthode contre un panel fixe de vecteurs de l'image), et la suite
 //   des marqueurs est rendue monotone : plus de cycle de Condorcet, stabilité toujours atteinte.
 //   Le classement des n pixels de la fenêtre (MinMaxVecteurs) est inchangé.
+// Version V5 : [V5] ensemble de référence de l'ordre anti-Condorcet = TOUS les pixels de l'image, calcul exact bande par bande
+//   à partir des histogrammes (la V4 utilisait un échantillon de 256 pixels).
 // =====================================================================================
 // EMP_QUALIFLEX_Q_Optimum_Local
 // Morphologie mathématique multivaluée (images multibandes) avec ordonnancement vectoriel
@@ -356,62 +358,35 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
         // [V4-ANTI-CONDORCET] ORDRE DE RÉFÉRENCE FIXE POUR LE ∧ / ∨ POINT À POINT DE LA RECONSTRUCTION
         // =====================================================================================
         // Méthode : QUALIFLEX.
-        // Problème corrigé : jusqu'ici, le ∧ / ∨ point à point de la reconstruction comparait deux vecteurs
-        // seuls (la méthode appliquée à l'ensemble {A, B}). Cette comparaison n'est pas transitive : elle
-        // admet des cycles de Condorcet (A > B, B > C et C > A), et la reconstruction pouvait tourner en
-        // boucle sans jamais se stabiliser.
-        // Correction : chaque vecteur v reçoit un score FIXE, calculé avec la même méthode et les mêmes
-        // paramètres, mais toujours contre le même panel de référence R : au plus TAILLE_PANEL_REF
-        // vecteurs prélevés une fois pour toutes dans l'image d'entrée f.
-        //   C_R(v) = (1/|R|) somme_{r dans R} somme_k w_k s_k(v, r),
-        //   s_k = +1 si v_k > r_k, -1 si v_k < r_k, 0 sinon (indice de concordance/discordance QUALIFLEX).
+        // Problème corrigé (V4) : le ∧ / ∨ point à point de la reconstruction comparait deux vecteurs seuls
+        // (la méthode appliquée à l'ensemble {A, B}). Cette comparaison n'est pas transitive : elle admet des
+        // cycles de Condorcet (A > B, B > C et C > A), et la reconstruction pouvait tourner en boucle sans
+        // jamais se stabiliser.
+        // Correction (V4) : chaque vecteur v reçoit un score FIXE, calculé avec la même méthode et les mêmes
+        // paramètres, mais toujours contre le même ensemble de référence R.
+        // [V5] R = TOUS les pixels de l'image d'entrée f (la V4 utilisait un échantillon de 256 pixels). Le score
+        // se décompose bande par bande : il est calculé EXACTEMENT à partir de l'histogramme de chaque bande de
+        // f (valeurs distinctes et nombre de pixels de chaque valeur), sans échantillonnage.
+        //   C_R(v) = (1/N) somme_{pixels r de f} somme_k w_k s_k(v, r) = somme_k w_k G_k(v_k),
+        //   s_k = +1 si v_k > r_k, -1 si v_k < r_k, 0 sinon (indice de concordance/discordance QUALIFLEX),
+        //   G_k(a) = (1/N) somme_{valeurs b de la bande k} n_k(b) signe(a - b), n_k(b) = nombre de pixels de valeur b.
         // Deux vecteurs sont comparés par ce score, puis par l'ordre lexicographique des bandes en cas
         // d'égalité : c'est un ordre TOTAL sur les valeurs (réflexif, antisymétrique, transitif), donc
         // aucun cycle de Condorcet n'est possible. Le classement des n pixels de la fenêtre
         // (MinMaxVecteurs) n'est PAS modifié : seul le ∧ / ∨ point à point de la reconstruction change.
-        private const int TAILLE_PANEL_REF = 256;          // [V4-ANTI-CONDORCET] nombre maximal de vecteurs du panel R
-        private List<int[]> panelRef;                       // [V4-ANTI-CONDORCET] panel de référence R
         private int[] prioriteRef;                          // [V4-ANTI-CONDORCET] ordre des bandes pour le départage
-        private Dictionary<int[], double> cacheScoreRef;    // [V4-ANTI-CONDORCET] score déjà calculé de chaque vecteur
         private double[] poidsRef;                          // [V4-ANTI-CONDORCET] poids des bandes
-        // [V4-ANTI-CONDORCET] Égalité exacte de deux vecteurs (clé du cache des scores)
-        private sealed class ComparateurVecteurs : IEqualityComparer<int[]>
-        {
-            public bool Equals(int[] a, int[] b)
-            {
-                if (ReferenceEquals(a, b)) return true;
-                if (a == null || b == null || a.Length != b.Length) return false;
-                for (int i = 0; i < a.Length; i++)
-                    if (a[i] != b[i]) return false;
-                return true;
-            }
+        private int nbPixelsRef;                            // [V5] N = nombre de pixels de l'image f (ensemble R)
+        private int[][] valeursRef;                         // [V5] valeurs distinctes de chaque bande de f (triées)
+        private int[][] effectifsRef;                       // [V5] nombre de pixels de f ayant chacune de ces valeurs
+        private Dictionary<int, double>[] scoreBandeRef;    // [V5] score par bande G_k(a) déjà calculé, pour chaque bande k
 
-            public int GetHashCode(int[] a)
-            {
-                unchecked
-                {
-                    int h = 17;
-                    for (int i = 0; i < a.Length; i++) h = h * 31 + a[i];
-                    return h;
-                }
-            }
-        }
-
-        // [V4-ANTI-CONDORCET] Construction du panel R (prélèvement systématique : un pixel sur 'pas', dans
-        // l'ordre de parcours x puis y de l'image d'entrée) et de l'ordre de départage des bandes.
+        // [V4-ANTI-CONDORCET] [V5] Préparation de l'ensemble de référence R = toute l'image f : histogramme de
+        // chaque bande et ordre de départage des bandes.
         private void PreparerOrdreReference(List<int[,]> imagesMat, double[] poids)
         {
             int m = imagesMat.Count;
-            int W = imagesMat[0].GetLength(0), H = imagesMat[0].GetLength(1);
-            int total = W * H;
-            int pas = Math.Max(1, (total + TAILLE_PANEL_REF - 1) / TAILLE_PANEL_REF);
-            panelRef = new List<int[]>();
-            for (int p = 0; p < total; p += pas)
-            {
-                int[] v = new int[m];
-                for (int k = 0; k < m; k++) v[k] = imagesMat[k][p / H, p % H];
-                panelRef.Add(v);
-            }
+            ConstruireHistogrammesRef(imagesMat);
             // Départage : bandes par poids décroissant (à poids égaux, la bande d'indice le plus petit d'abord)
             prioriteRef = new int[m];
             for (int k = 0; k < m; k++) prioriteRef[k] = k;
@@ -427,32 +402,74 @@ namespace EMP_QUALIFLEX_Q_Optimum_Local
                 prioriteRef[j + 1] = bande;
             }
             poidsRef = (double[])poids.Clone();
-
-            cacheScoreRef = new Dictionary<int[], double>(new ComparateurVecteurs());
         }
 
-        // [V4-ANTI-CONDORCET] Score fixe C_R(v) : indice de concordance/discordance QUALIFLEX de v contre le panel R
-        private double ScoreReference(int[] v)
+        // [V5] Histogramme de chaque bande de f : valeurs distinctes (triées) et nombre de pixels de chaque valeur.
+        // Toute somme sur les N pixels de f d'une quantité qui ne dépend que de la valeur du pixel dans la bande k
+        // se calcule exactement comme une somme sur ces valeurs distinctes, pondérée par leurs effectifs.
+        private void ConstruireHistogrammesRef(List<int[,]> imagesMat)
+        {
+            int m = imagesMat.Count;
+            int W = imagesMat[0].GetLength(0), H = imagesMat[0].GetLength(1);
+            nbPixelsRef = W * H;
+            valeursRef = new int[m][];
+            effectifsRef = new int[m][];
+            scoreBandeRef = new Dictionary<int, double>[m];
+            for (int k = 0; k < m; k++)
+            {
+                Dictionary<int, int> histo = new Dictionary<int, int>();
+                for (int x = 0; x < W; x++)
+                    for (int y = 0; y < H; y++)
+                    {
+                        int g = imagesMat[k][x, y];
+                        int c;
+                        histo.TryGetValue(g, out c);
+                        histo[g] = c + 1;
+                    }
+                valeursRef[k] = new int[histo.Count];
+                effectifsRef[k] = new int[histo.Count];
+                int i = 0;
+                foreach (KeyValuePair<int, int> e in histo)
+                {
+                    valeursRef[k][i] = e.Key;
+                    effectifsRef[k][i] = e.Value;
+                    i++;
+                }
+                Array.Sort(valeursRef[k], effectifsRef[k]);
+                scoreBandeRef[k] = new Dictionary<int, double>();
+            }
+        }
+
+        // [V5] G_k(a) = (1/N) somme sur les pixels r de f de signe(a - r_k), calculé exactement à partir de
+        // l'histogramme de la bande k (somme sur les valeurs distinctes, pondérée par les effectifs)
+        private double ScoreBande(int k, int a)
         {
             double s;
-            if (cacheScoreRef.TryGetValue(v, out s)) return s;
-            int m = v.Length;
+            if (scoreBandeRef[k].TryGetValue(a, out s)) return s;
+            int[] val = valeursRef[k], eff = effectifsRef[k];
             double somme = 0;
-            foreach (int[] r in panelRef)
-                for (int k = 0; k < m; k++)
-                {
-                    int signe = v[k] > r[k] ? 1 : (v[k] < r[k] ? -1 : 0);
-                    somme += poidsRef[k] * signe;
-                }
-            s = somme / panelRef.Count;
-            if (double.IsNaN(s) || double.IsInfinity(s)) s = 0;   // sécurité : le score reste une fonction de v
-            s = Math.Round(s, 10);                                 // arrondi fixe : ex aequo numériques => départage lexicographique
-            cacheScoreRef[v] = s;
+            for (int j = 0; j < val.Length; j++)
+            {
+                int signe = a > val[j] ? 1 : (a < val[j] ? -1 : 0);
+                somme += eff[j] * signe;
+            }
+            s = somme / nbPixelsRef;
+            scoreBandeRef[k][a] = s;
             return s;
         }
 
+        // [V4-ANTI-CONDORCET] [V5] Score fixe de v contre TOUS les pixels de l'image : somme_k w_k G_k(v_k),
+        // G_k(v_k) = ScoreBande(k, v_k)
+        private double ScoreReference(int[] v)
+        {
+            double s = 0;
+            for (int k = 0; k < v.Length; k++) s += poidsRef[k] * ScoreBande(k, v[k]);
+            if (double.IsNaN(s) || double.IsInfinity(s)) s = 0;   // sécurité : le score reste une fonction de v
+            return Math.Round(s, 10);                              // arrondi fixe : ex aequo numériques => départage lexicographique
+        }
+
         // [V4-ANTI-CONDORCET] Comparaison de deux vecteurs pour le ∧ / ∨ point à point de la reconstruction :
-        // score fixe (contre le panel R), puis ordre lexicographique des bandes (prioriteRef) en cas d'égalité.
+        // score fixe (contre l'ensemble de référence R), puis ordre lexicographique des bandes (prioriteRef) en cas d'égalité.
         // C'est un ordre total sur les valeurs : il est transitif, aucun cycle de Condorcet n'est possible.
         // Retourne -1 si A < B, 0 si A et B sont le même vecteur, 1 si A > B.
         private int CompareReference(List<int[,]> imgA, int xa, int ya, List<int[,]> imgB, int xb, int yb)
